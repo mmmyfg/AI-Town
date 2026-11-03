@@ -1,6 +1,7 @@
 package com.cybertown.websocket;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.cybertown.service.PlayerIdentityService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.CloseStatus;
@@ -21,10 +22,20 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private final Map<String, String> sessionPlayers = new ConcurrentHashMap<>();
 
     @Autowired private ObjectMapper objectMapper;
+    @Autowired private PlayerIdentityService identities;
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) throws IOException {
-        String playerId = queryParameter(session, "playerId");
+        String playerId;
+        if (identities.required()) {
+            try { playerId = identities.verify(queryParameter(session, "token")); }
+            catch (Exception exception) {
+                session.close(CloseStatus.POLICY_VIOLATION.withReason("invalid player token"));
+                return;
+            }
+        } else {
+            playerId = queryParameter(session, "playerId");
+        }
         if (playerId == null || playerId.isBlank()) {
             session.close(CloseStatus.BAD_DATA.withReason("playerId is required"));
             return;

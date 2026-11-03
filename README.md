@@ -24,13 +24,14 @@ Godot 客户端
 Java Gateway
   -> RabbitMQ / Redis / MySQL
 Python backend
-  -> Groq(OpenAI 兼容接口) + LangChain + Chroma
+  -> DeepSeek(OpenAI 兼容接口) + LangChain + Chroma
 ```
 
 ## 当前功能
 
 - 3 个可交互 NPC：`牧濑红莉栖`、`雪之下雪乃`、`仪玄`
 - 玩家与 NPC 对话
+- 双 NPC 场景对话（独立角色记忆、按轮次接话、按序展示）
 - NPC 巡逻、交互、气泡台词刷新
 - 异步聊天任务：HTTP 提交，轮询或 WebSocket 收取结果
 - 玩家—NPC 维度的好感度与情绪状态联动
@@ -66,7 +67,9 @@ Python backend
 ## 关键接口与端口
 
 - Godot -> Java:
+  - `POST /api/player/guest`（签名访客身份）
   - `POST /api/chat`
+  - `POST /api/chat/scene`
   - `GET /api/chat/result/{taskId}`
   - `GET /api/npcs`
   - `GET /api/npcs/status`
@@ -79,15 +82,17 @@ Python backend
 ## 启动顺序
 
 1. 启动基础设施：MySQL、Redis、RabbitMQ
-2. 启动 Python 服务：`backend/main.py`
-3. 启动 Python 消费端：`backend/mq_consumer.py`
+2. 启动 Python 交互消费者：`backend/mq_consumer.py`
+3. 启动 Python 后台消费者：`backend/background_consumer.py`
 4. 启动 Java 网关：`java-gateway`
 5. 用 Godot 打开 `helloagents-ai-town/project.godot` 并运行
 
 ## 文档
 
+- [项目完整说明：功能、流程与技术栈](./PROJECT_OVERVIEW.md)
 - [安装配置指南](./SETUP_GUIDE.md)
 - [可靠 Agent 后端设计](./RELIABLE_AGENT_BACKEND.md)
+- [Multi-Agent 升级现状与验证](./MULTI_AGENT_UPGRADE.md)
 - [对话版 Planner-Executor 设计稿](./DIALOGUE_PLANNER_EXECUTOR_GUIDE.md)
 - [对话日志系统](./DIALOGUE_LOG_GUIDE.md)
 - [好感度系统](./AFFINITY_SYSTEM_GUIDE.md)
@@ -96,3 +101,4 @@ Python backend
 ## 说明
 
 仓库里仍然保留了一些旧版示例文件或旧思路文档，但当前代码实际运行方式以上面的模块说明为准。
+场景默认一轮，每位 NPC 发言一次；如需两轮，需同步设置 Java 与 Python 的模型调用预算并先执行 `005_scene_turns.sql`。详见[项目完整说明](./PROJECT_OVERVIEW.md)。

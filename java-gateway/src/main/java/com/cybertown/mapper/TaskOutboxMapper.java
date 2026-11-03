@@ -14,7 +14,8 @@ public interface TaskOutboxMapper extends BaseMapper<TaskOutbox> {
     @Select("""
             SELECT * FROM task_outbox
             WHERE status IN ('PENDING', 'FAILED', 'SENDING') AND next_retry_at <= CURRENT_TIMESTAMP(3)
-            ORDER BY id ASC LIMIT #{limit}
+            ORDER BY CASE WHEN routing_key = 'chat.task' THEN 0 ELSE 1 END, id ASC
+            LIMIT #{limit}
             """)
     List<TaskOutbox> selectPublishable(@Param("limit") int limit);
 

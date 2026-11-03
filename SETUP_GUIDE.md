@@ -28,7 +28,7 @@ Helloagents-AI-Town/
 ## 端口约定
 
 - Godot 访问 Java 网关：`http://localhost:8080`
-- Godot WebSocket：`ws://localhost:8080/ws/chat?playerId=player_1`
+- Godot WebSocket：`ws://localhost:8080/ws/chat?token=<访客令牌>`（客户端自动连接）
 - Python FastAPI：`http://localhost:8000`
 - MySQL：`3307`
 - Redis：`6379`
@@ -69,9 +69,10 @@ cp .env.example .env
 docker compose up -d
 ```
 
-它会启动 MySQL、Redis 和 RabbitMQ，并在全新 MySQL 数据卷中执行
-`docker/mysql-init/001_init.sql` 与 `002_reliable_chat.sql`。如果复用升级前的数据卷，需手动执行
-`002_reliable_chat.sql`。
+它会启动 MySQL、Redis 和 RabbitMQ。全新 MySQL 数据卷会依序执行
+`docker/mysql-init/001_init.sql` 至 `005_scene_turns.sql`。本机现有开发数据库已执行 003、004、005；其他旧数据卷需先备份，再手工执行缺失的迁移脚本。005 为 `conversation_messages` 增加 `turn_no`，运行新版 Java 网关前必须执行。
+
+场景默认 `SCENE_ROUNDS=1`，两位 NPC 各发言一次，后发言角色会看到前一位的台词。若要开启两轮，请在根目录 `.env` 设置 `SCENE_ROUNDS=2`、`MAX_LLM_CALLS_PER_TASK=4`，并在 `backend/.env` 设置 `MAX_LLM_CALLS_PER_TASK=4`；Python 还会用 `MAX_SCENE_ROUNDS=2` 作为硬上限。两轮双 NPC 最多调用模型 4 次，耗时和费用相应增加。
 
 如果不使用 Docker，请先确保本机已经准备好：
 
@@ -83,7 +84,7 @@ docker compose up -d
 
 ## 第二步：配置 Python 推理服务
 
-进入 [backend](/Users/cuihaoyu/Desktop/集合/hello-agents/Helloagents-AI-Town/backend)：
+进入 [backend](./backend)：
 
 ```bash
 cd backend
@@ -103,7 +104,8 @@ venv\Scripts\activate
 当前代码实际会读取这些关键变量：
 
 ```env
-GROQ_API_KEY=your-groq-api-key
+NPC_LLM_PROVIDER=deepseek
+DEEPSEEK_API_KEY=your-deepseek-api-key
 RABBITMQ_HOST=localhost
 RABBITMQ_PORT=5672
 REDIS_HOST=localhost
@@ -113,15 +115,19 @@ REDIS_DB=0
 
 说明：
 
-- `langchain_agent.py` 当前默认使用 Groq 的 OpenAI 兼容接口
-- 没有 `GROQ_API_KEY` 时，推理服务大概率无法正常生成回复
-- 仓库里的 [backend/.env.example](/Users/cuihaoyu/Desktop/集合/hello-agents/Helloagents-AI-Town/backend/.env.example) 还保留了旧示例内容，不能完全当作当前运行配置
+- 这台电脑的 `backend/.env` 已选择 DeepSeek；官方当前聊天模型名为 `deepseek-flash`
+- `DEEPSEEK_API_KEY` 留空时，消费者会明确提示缺少密钥并退出
+- 仓库里的 [backend/.env.example](./backend/.env.example) 还保留了旧示例内容，不能完全当作当前运行配置
 
-如果你使用 `.env`，把它放在 [backend/.env](/Users/cuihaoyu/Desktop/集合/hello-agents/Helloagents-AI-Town/backend/.env)。
+项目根目录 `.env` 供 Docker 和 Java 使用，至少设置 `MYSQL_PASSWORD` 和稳定的 `PLAYER_TOKEN_SECRET`。Python 消费端在 `backend` 目录运行时会优先读取 `backend/.env`。项目默认已切换 DeepSeek；这台电脑的 `DEEPSEEK_API_KEY` 已在该文件中配置并完成真实接口验证。不要将密钥贴到聊天或提交到 Git。
+
+默认模型端点是 DeepSeek 官方 `https://api.deepseek.com`，默认模型为 `deepseek-flash` 非思考模式。若需改用 Groq，设置 `NPC_LLM_PROVIDER=groq` 与 `GROQ_API_KEY`；若需其他 OpenAI 兼容服务，设置 `NPC_LLM_PROVIDER=custom` 并**同时**提供 `NPC_LLM_BASE_URL`、`NPC_LLM_MODEL` 和 `NPC_LLM_API_KEY`。修改模型配置后重启交互与后台消费者。HTTP 401/403 等不可重试的模型错误会直接使任务失败；只有临时错误继续走队列重试。
+
+如果启动消费者时出现 Hugging Face `Connection reset by peer`，说明嵌入模型尚未完整缓存且当前网络无法下载。当前这台电脑已在 `backend/.env` 临时选择已缓存的 `all-MiniLM-L6-v2` 并开启 `EMBEDDING_LOCAL_FILES_ONLY=true`，消费者可以离线启动。该模型主要面向英文，对中文记忆检索的质量有限；同时使用独立的 `MEMORY_COLLECTION_NAME`，不会把不同模型的向量写入原记忆库。网络恢复并下载完整多语言模型后，可移除这三项临时覆盖，恢复默认模型和原记忆库。
 
 ## 第三步：启动 Python 服务
 
-### 1. 启动 FastAPI 推理接口
+### 1. 启动 FastAPI 推理接口（只在需要单独调用 HTTP 接口时）
 
 在 `backend` 目录执行：
 
@@ -134,7 +140,7 @@ python main.py
 - `http://localhost:8000/health`
 - `http://localhost:8000/docs`
 
-### 2. 启动 RabbitMQ 消费端
+### 2. 启动 RabbitMQ 消费端（游戏对话必需）
 
 另开一个终端，在 `backend` 目录执行：
 
@@ -142,11 +148,19 @@ python main.py
 python mq_consumer.py
 ```
 
+再开一个终端运行后台记忆消费者：
+
+```bash
+python background_consumer.py
+```
+
+新数据库会自动执行 `003_scene_messages.sql`、`004_client_request_keys.sql` 和 `005_scene_turns.sql`；已有数据库需先备份，再手工执行缺失的脚本。完整说明及验证结果见 [Multi-Agent 升级交付记录](./MULTI_AGENT_UPGRADE.md)。
+
 这一步不能省。
 
 原因是：
 
-- `main.py` 负责对外提供 `/agent/react`
+- `main.py` 负责对外提供 `/agent/react`，Godot 的队列聊天不依赖该 HTTP 进程
 - `mq_consumer.py` 负责消费聊天任务队列并把结果回写 Redis / RabbitMQ
 - 只启动 `main.py` 时，完整聊天链路不会跑通
 
@@ -171,7 +185,7 @@ set -a; . ../.env; set +a
 
 在 Godot 中导入这个项目文件：
 
-- [project.godot](/Users/cuihaoyu/Desktop/集合/hello-agents/Helloagents-AI-Town/helloagents-ai-town/project.godot)
+- [project.godot](./helloagents-ai-town/project.godot)
 
 不要导入 `scenes/main.tscn`，正确做法是导入整个 Godot 项目目录：
 

@@ -25,14 +25,35 @@ spring:
       simple:
         acknowledge-mode: manual
         default-requeue-rejected: false
+        concurrency: ${RESULT_CONSUMER_CONCURRENCY:1}
+        max-concurrency: ${RESULT_CONSUMER_MAX_CONCURRENCY:2}
+        prefetch: ${RESULT_CONSUMER_PREFETCH:10}
 
 chat:
+  websocket:
+    core-threads: ${WS_PUSH_CORE_THREADS:2}
+    max-threads: ${WS_PUSH_MAX_THREADS:4}
+    queue-capacity: ${WS_PUSH_QUEUE_CAPACITY:100}
+  scene:
+    max-npcs: ${MAX_NPCS_PER_SCENE:3}
+    rounds: ${SCENE_ROUNDS:1}
+    max-model-calls: ${MAX_LLM_CALLS_PER_TASK:3}
+  npc-interaction:
+    enabled: ${NPC_AUTONOMOUS_ENABLED:false}
+    interval-ms: ${NPC_INTERACTION_INTERVAL_MS:300000}
+    max-per-day: ${NPC_INTERACTION_MAX_PER_DAY:4}
+    cooldown-seconds: ${NPC_INTERACTION_COOLDOWN_SECONDS:3600}
   outbox:
     publish-interval-ms: 500
   task:
     timeout-seconds: 90
     max-compensations: 3
     recovery-interval-ms: 15000
+
+auth:
+  required: ${AUTH_REQUIRED:true}
+  token-secret: ${PLAYER_TOKEN_SECRET:}
+  ttl-seconds: ${PLAYER_TOKEN_TTL_SECONDS:2592000}
 
 mybatis-plus:
   configuration:

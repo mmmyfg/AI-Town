@@ -8,6 +8,7 @@ import redis
 from dotenv import load_dotenv
 
 from langchain_agent import LangChainNPCAgent
+from scene_orchestrator import run_scene
 
 load_dotenv(override=True)
 
@@ -17,10 +18,16 @@ CHAT_TASK_QUEUE = "chat_task_queue"
 CHAT_RESULT_QUEUE = "chat_result_queue"
 CHAT_TASK_DLQ = "chat_task_dlq"
 CHAT_RESULT_DLQ = "chat_result_dlq"
+BACKGROUND_QUEUE = "chat_background_queue"
+BACKGROUND_RETRY_QUEUE = "chat_background_retry_30s"
+BACKGROUND_DLQ = "chat_background_dlq"
 TASK_ROUTING_KEY = "chat.task"
 RESULT_ROUTING_KEY = "chat.result"
 TASK_DEAD_ROUTING_KEY = "chat.task.dead"
 RESULT_DEAD_ROUTING_KEY = "chat.result.dead"
+BACKGROUND_ROUTING_KEY = "chat.background"
+BACKGROUND_RETRY_ROUTING_KEY = "chat.background.retry"
+BACKGROUND_DEAD_ROUTING_KEY = "chat.background.dead"
 RETRY_QUEUES = ("chat_task_retry_5s", "chat_task_retry_15s", "chat_task_retry_45s")
 RETRY_ROUTING_KEYS = ("chat.task.retry.1", "chat.task.retry.2", "chat.task.retry.3")
 RETRY_TTLS = (5_000, 15_000, 45_000)
@@ -30,6 +37,26 @@ TASK_TTL_SECONDS = int(os.getenv("CHAT_TASK_TTL_SECONDS", "1800"))
 REDIS_TASK_PREFIX = "chat:task:"
 REDIS_CLAIM_PREFIX = "chat:claim:"
 TERMINAL_STATES = {"COMPLETED", "TIMEOUT"}
+NON_RETRYABLE_MODEL_STATUSES = {400, 401, 403, 404, 422}
+
+
+class PermanentModelError(Exception):
+    def __init__(self, status_code: int):
+        super().__init__(f"模型服务返回 HTTP {status_code}")
+        self.status_code = status_code
+
+
+def is_non_retryable_model_error(exc: Exception) -> bool:
+    return getattr(exc, "status_code", None) in NON_RETRYABLE_MODEL_STATUSES
+
+
+def model_error_message(exc: Exception) -> str:
+    status = getattr(exc, "status_code", None)
+    if status == 403:
+        return "模型服务返回 HTTP 403，请检查网络出口或模型服务权限"
+    if status in NON_RETRYABLE_MODEL_STATUSES:
+        return f"模型服务返回 HTTP {status}，请检查模型服务配置"
+    return f"推理失败: {exc}"
 
 
 def redis_client() -> redis.Redis:
@@ -66,7 +93,8 @@ def claim_task(cache: redis.Redis, task_id: str) -> tuple[str, str | None]:
     return ("acquired", token) if acquired else ("busy", None)
 
 
-def release_claim(cache: redis.Redis, task_id: str, token: str | None) -> None:
+def release_claim(cache: redis.Redis, task_id: str, token: str | None,
+                  prefix: str = REDIS_CLAIM_PREFIX) -> None:
     if not token:
         return
     cache.eval(
@@ -77,7 +105,7 @@ def release_claim(cache: redis.Redis, task_id: str, token: str | None) -> None:
         return 0
         """,
         1,
-        REDIS_CLAIM_PREFIX + task_id,
+        prefix + task_id,
         token,
     )
 
@@ -113,6 +141,7 @@ def publish_json(channel, routing_key: str, payload: dict, event_type: str, head
 def status_payload(task: dict, event_type: str, retry_count: int, error_message: str = "") -> dict:
     return {
         "taskId": task["taskId"],
+        "traceId": task.get("traceId", task["taskId"]),
         "eventType": event_type,
         "playerId": task.get("playerId", ""),
         "npcId": task.get("npcId", ""),
@@ -129,6 +158,7 @@ def status_payload(task: dict, event_type: str, retry_count: int, error_message:
 def result_payload(task: dict, parsed: dict, success: bool, retry_count: int, error_message: str = "") -> dict:
     return {
         "taskId": task["taskId"],
+        "traceId": task.get("traceId", task["taskId"]),
         "eventType": "RESULT",
         "playerId": task.get("playerId", ""),
         "npcId": task.get("npcId", ""),
@@ -186,6 +216,24 @@ def declare_topology(channel) -> None:
     channel.queue_declare(queue=CHAT_RESULT_DLQ, durable=True)
     channel.queue_bind(CHAT_TASK_DLQ, CHAT_DLX, TASK_DEAD_ROUTING_KEY)
     channel.queue_bind(CHAT_RESULT_DLQ, CHAT_DLX, RESULT_DEAD_ROUTING_KEY)
+
+    channel.queue_declare(
+        queue=BACKGROUND_QUEUE,
+        durable=True,
+        arguments={"x-dead-letter-exchange": CHAT_DLX,
+                   "x-dead-letter-routing-key": BACKGROUND_DEAD_ROUTING_KEY},
+    )
+    channel.queue_declare(
+        queue=BACKGROUND_RETRY_QUEUE,
+        durable=True,
+        arguments={"x-message-ttl": 30_000,
+                   "x-dead-letter-exchange": CHAT_EXCHANGE,
+                   "x-dead-letter-routing-key": BACKGROUND_ROUTING_KEY},
+    )
+    channel.queue_declare(queue=BACKGROUND_DLQ, durable=True)
+    channel.queue_bind(BACKGROUND_QUEUE, CHAT_EXCHANGE, BACKGROUND_ROUTING_KEY)
+    channel.queue_bind(BACKGROUND_RETRY_QUEUE, CHAT_EXCHANGE, BACKGROUND_RETRY_ROUTING_KEY)
+    channel.queue_bind(BACKGROUND_DLQ, CHAT_DLX, BACKGROUND_DEAD_ROUTING_KEY)
 
     for queue, routing_key, ttl in zip(RETRY_QUEUES, RETRY_ROUTING_KEYS, RETRY_TTLS):
         channel.queue_declare(
@@ -285,16 +333,29 @@ def main():
                 "PROCESSING",
             )
 
-            raw_reply = agent.react(
-                player_id=task["playerId"],
-                npc_id=task["npcId"],
-                conversation_id=task.get("conversationId", ""),
-                current_affinity=int(task.get("currentAffinity", 50)),
-                personality=task["personality"],
-                observation=task["observation"],
-                memory=task.get("memory", ""),
-            )
-            parsed = parse_agent_reply(raw_reply)
+            if task.get("mode") == "group":
+                scene_messages = run_scene(agent, task)
+                if not any(item["status"] == "COMPLETED" for item in scene_messages):
+                    permanent_status = next((item.get("httpStatus") for item in scene_messages
+                                             if item.get("httpStatus") in NON_RETRYABLE_MODEL_STATUSES), None)
+                    if permanent_status is not None:
+                        raise PermanentModelError(permanent_status)
+                    failures = ", ".join(f"{item['npcId']}:{item.get('error', 'unknown')}"
+                                         for item in scene_messages)
+                    raise RuntimeError(f"所有场景角色都生成失败 ({failures})")
+                parsed = {"reply": json.dumps(scene_messages, ensure_ascii=False), "affinity_change": 0}
+            else:
+                raw_reply = agent.react(
+                    player_id=task["playerId"],
+                    npc_id=task["npcId"],
+                    conversation_id=task.get("conversationId", ""),
+                    current_affinity=int(task.get("currentAffinity", 50)),
+                    personality=task["personality"],
+                    observation=task["observation"],
+                    memory=task.get("memory", ""),
+                    persist_long_term=False,
+                )
+                parsed = parse_agent_reply(raw_reply)
 
             store_state(
                 cache,
@@ -315,7 +376,7 @@ def main():
             print(f"✅ task_id={task_id} 推理完成并确认结果投递")
         except Exception as exc:
             task_id = task.get("taskId", "unknown")
-            error_message = f"推理失败: {exc}"
+            error_message = model_error_message(exc)
             print(f"❌ task_id={task_id} attempt={retry_count}: {error_message}")
 
             if task_id == "unknown":
@@ -324,7 +385,7 @@ def main():
 
             next_retry = retry_count + 1
             try:
-                if next_retry <= MAX_RETRIES:
+                if next_retry <= MAX_RETRIES and not is_non_retryable_model_error(exc):
                     store_state(
                         cache,
                         task_id,

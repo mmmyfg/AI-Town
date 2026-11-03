@@ -2,6 +2,7 @@ package com.cybertown.dto;
 
 public class ChatResultMessage {
     private String taskId;
+    private String traceId;
     private String eventType = "RESULT";
     private String playerId;
     private String npcId;
@@ -16,6 +17,9 @@ public class ChatResultMessage {
     public String getTaskId() {
         return taskId;
     }
+
+    public String getTraceId() { return traceId; }
+    public void setTraceId(String traceId) { this.traceId = traceId; }
 
     public void setTaskId(String taskId) {
         this.taskId = taskId;

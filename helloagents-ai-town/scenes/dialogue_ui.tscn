@@ -67,3 +67,17 @@ offset_top = 180.0
 offset_right = 1240.0
 offset_bottom = 220.0
 text = "关闭"
+
+[node name="SceneButton" type="Button" parent="Panel"]
+offset_left = 350.0
+offset_top = 36.0
+offset_right = 470.0
+offset_bottom = 66.0
+text = "多人场景"
+
+[node name="Companion" type="OptionButton" parent="Panel"]
+offset_left = 480.0
+offset_top = 36.0
+offset_right = 680.0
+offset_bottom = 66.0
+visible = false

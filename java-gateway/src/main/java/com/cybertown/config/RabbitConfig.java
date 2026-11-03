@@ -17,11 +17,17 @@ public class RabbitConfig {
     public static final String CHAT_RESULT_QUEUE = "chat_result_queue";
     public static final String CHAT_TASK_DLQ = "chat_task_dlq";
     public static final String CHAT_RESULT_DLQ = "chat_result_dlq";
+    public static final String BACKGROUND_QUEUE = "chat_background_queue";
+    public static final String BACKGROUND_RETRY_QUEUE = "chat_background_retry_30s";
+    public static final String BACKGROUND_DLQ = "chat_background_dlq";
 
     public static final String TASK_ROUTING_KEY = "chat.task";
     public static final String RESULT_ROUTING_KEY = "chat.result";
     public static final String TASK_DEAD_ROUTING_KEY = "chat.task.dead";
     public static final String RESULT_DEAD_ROUTING_KEY = "chat.result.dead";
+    public static final String BACKGROUND_ROUTING_KEY = "chat.background";
+    public static final String BACKGROUND_RETRY_ROUTING_KEY = "chat.background.retry";
+    public static final String BACKGROUND_DEAD_ROUTING_KEY = "chat.background.dead";
 
     public static final String[] TASK_RETRY_QUEUES = {
             "chat_task_retry_5s", "chat_task_retry_15s", "chat_task_retry_45s"
@@ -64,6 +70,26 @@ public class RabbitConfig {
     public Queue chatResultDlq() { return QueueBuilder.durable(CHAT_RESULT_DLQ).build(); }
 
     @Bean
+    public Queue chatBackgroundQueue() {
+        return QueueBuilder.durable(BACKGROUND_QUEUE)
+                .deadLetterExchange(CHAT_DLX)
+                .deadLetterRoutingKey(BACKGROUND_DEAD_ROUTING_KEY)
+                .build();
+    }
+
+    @Bean
+    public Queue chatBackgroundRetryQueue() {
+        return QueueBuilder.durable(BACKGROUND_RETRY_QUEUE)
+                .ttl(30_000)
+                .deadLetterExchange(CHAT_EXCHANGE)
+                .deadLetterRoutingKey(BACKGROUND_ROUTING_KEY)
+                .build();
+    }
+
+    @Bean
+    public Queue chatBackgroundDlq() { return QueueBuilder.durable(BACKGROUND_DLQ).build(); }
+
+    @Bean
     public Queue chatTaskRetry5s() { return retryQueue(0); }
 
     @Bean
@@ -88,6 +114,21 @@ public class RabbitConfig {
     @Bean
     public Binding resultBinding(Queue chatResultQueue, DirectExchange chatExchange) {
         return BindingBuilder.bind(chatResultQueue).to(chatExchange).with(RESULT_ROUTING_KEY);
+    }
+
+    @Bean
+    public Binding backgroundBinding(Queue chatBackgroundQueue, DirectExchange chatExchange) {
+        return BindingBuilder.bind(chatBackgroundQueue).to(chatExchange).with(BACKGROUND_ROUTING_KEY);
+    }
+
+    @Bean
+    public Binding backgroundRetryBinding(Queue chatBackgroundRetryQueue, DirectExchange chatExchange) {
+        return BindingBuilder.bind(chatBackgroundRetryQueue).to(chatExchange).with(BACKGROUND_RETRY_ROUTING_KEY);
+    }
+
+    @Bean
+    public Binding backgroundDlqBinding(Queue chatBackgroundDlq, DirectExchange chatDeadLetterExchange) {
+        return BindingBuilder.bind(chatBackgroundDlq).to(chatDeadLetterExchange).with(BACKGROUND_DEAD_ROUTING_KEY);
     }
 
     @Bean

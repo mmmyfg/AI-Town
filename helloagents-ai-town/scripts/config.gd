@@ -4,10 +4,12 @@ extends Node
 # ==================== API配置 ====================
 const API_BASE_URL = "http://localhost:8080"
 const API_CHAT = API_BASE_URL + "/api/chat"
+const API_CHAT_SCENE = API_BASE_URL + "/api/chat/scene"
+const API_GUEST_SESSION = API_BASE_URL + "/api/player/guest"
 const API_CHAT_RESULT = API_BASE_URL + "/api/chat/result/"
 const API_NPCS = API_BASE_URL + "/api/npcs"
 const API_NPC_STATUS = API_BASE_URL + "/api/npcs/status"
-const WS_CHAT_URL = "ws://localhost:8080/ws/chat?playerId=player_1"
+const WS_CHAT_URL = "ws://localhost:8080/ws/chat"
 const CHAT_RESULT_POLL_INTERVAL = 1.0
 
 # ==================== NPC配置 (已更新为动漫女神版) ====================

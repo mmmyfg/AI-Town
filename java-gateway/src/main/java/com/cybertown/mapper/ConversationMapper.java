@@ -45,4 +45,18 @@ public interface ConversationMapper {
                       @Param("sequenceNo") long sequenceNo,
                       @Param("role") String role,
                       @Param("content") String content);
+
+    @Insert("""
+            INSERT INTO conversation_messages
+              (conversation_id, task_id, player_id, npc_id, sequence_no, role, content, turn_no)
+            VALUES
+              (#{conversationId}, #{taskId}, #{playerId}, #{npcId}, #{sequenceNo}, 'ASSISTANT', #{content}, #{turnNo})
+            """)
+    int insertSceneMessage(@Param("conversationId") String conversationId,
+                           @Param("taskId") String taskId,
+                           @Param("playerId") String playerId,
+                           @Param("npcId") String npcId,
+                           @Param("sequenceNo") long sequenceNo,
+                           @Param("content") String content,
+                           @Param("turnNo") int turnNo);
 }

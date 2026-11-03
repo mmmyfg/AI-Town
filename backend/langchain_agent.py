@@ -2,6 +2,9 @@ import json
 import math
 import os
 import re
+import threading
+import uuid
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -24,6 +27,14 @@ memory_store: dict[str, list[Any]] = {}
 # affinity_store 保存数值好感度，affinity_reason_store 保存最近几次变化原因。
 affinity_store: dict[str, int] = {}
 affinity_reason_store: dict[str, list[str]] = {}
+_scene_affinity: ContextVar[tuple[str, str, int] | None] = ContextVar("scene_affinity", default=None)
+
+
+def current_affinity_for(player_id: str, npc_id: str) -> int:
+    scene = _scene_affinity.get()
+    if scene is not None and scene[:2] == (player_id, npc_id):
+        return scene[2]
+    return affinity_store.get(get_session_id(player_id, npc_id), 50)
 
 # Java / MySQL 现在是 NPC 画像的唯一真实来源。
 # Python 侧不再维护按角色写死的人物资料，只保留最小兜底值，
@@ -299,24 +310,48 @@ class LangChainNPCAgent:
     - Planned Responder
     """
 
-    def __init__(self, model_name: str = "llama-3.1-8b-instant"):
-        api_key = os.getenv("GROQ_API_KEY")
-        if not api_key:
-            print("⚠️ 警告: 未找到 GROQ_API_KEY，请检查 .env 文件！")
+    def __init__(self, model_name: str | None = None):
+        provider = os.getenv("NPC_LLM_PROVIDER", "deepseek").strip().lower()
+        self.provider = provider
+        custom_settings = ("NPC_LLM_BASE_URL", "NPC_LLM_MODEL", "NPC_LLM_API_KEY")
+        custom_values = [os.getenv(name, "").strip() for name in custom_settings]
+        if provider == "deepseek":
+            base_url = "https://api.deepseek.com"
+            configured_model = os.getenv("NPC_LLM_MODEL", "deepseek-flash").strip() or "deepseek-flash"
+            api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+            if not api_key:
+                raise ValueError("未配置 DEEPSEEK_API_KEY，请写入 backend/.env 后重启消费者")
+            extra_body = {"thinking": {"type": "disabled"}}
+        elif provider == "groq":
+            base_url = "https://api.groq.com/openai/v1"
+            configured_model = "llama-3.1-8b-instant"
+            api_key = os.getenv("GROQ_API_KEY", "").strip()
+            if not api_key:
+                raise ValueError("未配置 GROQ_API_KEY")
+            extra_body = None
+        elif provider == "custom":
+            if not all(custom_values):
+                raise ValueError("切换模型服务时必须同时配置 NPC_LLM_BASE_URL、NPC_LLM_MODEL 和 NPC_LLM_API_KEY")
+            base_url, configured_model, api_key = custom_values
+            extra_body = None
+        else:
+            raise ValueError(f"不支持的 NPC_LLM_PROVIDER: {provider}")
 
-        # 当前统一走 Groq 的 OpenAI 兼容接口。
-        # 第一阶段先保持单模型，后续如果需要可以拆分成 router / planner / responder 不同模型。
         self.llm = ChatOpenAI(
-            model_name=model_name,
+            model_name=model_name or configured_model,
             api_key=api_key,
-            base_url="https://api.groq.com/openai/v1",
-            temperature=0.7,
-            max_tokens=220,
+            base_url=base_url,
+            temperature=0.2 if provider == "deepseek" else 0.7,
+            max_tokens=512 if provider == "deepseek" else 220,
             timeout=float(os.getenv("LLM_TIMEOUT_SECONDS", "45")),
             max_retries=0,
+            **({"extra_body": extra_body} if extra_body is not None else {}),
         )
         # 长期记忆提取复用同一模型连接，但使用低温度减少事实漂移。
-        self.memory_llm = self.llm.bind(temperature=0, max_tokens=320)
+        self.memory_llm = self.llm.bind(
+            temperature=0, max_tokens=320,
+            **({"response_format": {"type": "json_object"}} if provider == "deepseek" else {}),
+        )
 
         self.short_memory = RedisShortTermMemory()
 
@@ -324,7 +359,11 @@ class LangChainNPCAgent:
         # 长期记忆使用本地向量库 Chroma：
         # - embeddings 负责把对话片段转成向量
         # - vector_db 负责持久化与相似检索
-        self.embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_NAME)
+        local_only = os.getenv("EMBEDDING_LOCAL_FILES_ONLY", "false").lower() in {"1", "true", "yes"}
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name=EMBEDDING_MODEL_NAME,
+            model_kwargs={"local_files_only": True} if local_only else {},
+        )
         self.vector_db = Chroma(
             collection_name=MEMORY_COLLECTION_NAME,
             embedding_function=self.embeddings,
@@ -362,7 +401,7 @@ class LangChainNPCAgent:
 }}""",
                 ),
                 MessagesPlaceholder(variable_name="history"),
-                ("user", "玩家对你说：{observation}"),
+                ("user", "本轮观测：{observation}"),
             ]
         )
 
@@ -402,7 +441,7 @@ class LangChainNPCAgent:
 }}""",
                 ),
                 MessagesPlaceholder(variable_name="history"),
-                ("user", "玩家原始消息：{observation}"),
+                ("user", "本轮观测：{observation}"),
             ]
         )
 
@@ -446,8 +485,7 @@ class LangChainNPCAgent:
         # Python 不再按 NPC 名字维护一份重复画像，只在上游字段缺失时使用通用兜底值。
         # 如果传了 player_id，还会顺带把该玩家与该 NPC 当前关系分数带回来。
         print(f"🪪 [工具] get_npc_profile(npc_id={npc_id})")
-        session_id = get_session_id(player_id or "profile_lookup", npc_id)
-        affinity = affinity_store.get(session_id, 50)
+        affinity = current_affinity_for(player_id or "profile_lookup", npc_id)
         return {
             "success": True,
             "tool": "get_npc_profile",
@@ -618,7 +656,12 @@ class LangChainNPCAgent:
         player_message: str,
         reply_text: str,
         affinity_change: int,
+        source_id: str | None = None,
     ) -> None:
+        if source_id:
+            existing = self.vector_db.get(where={"source_id": {"$eq": source_id}}, limit=1)
+            if existing.get("ids"):
+                return
         should_store, importance = self.should_store_memory(player_message, affinity_change)
         if not should_store:
             return
@@ -634,6 +677,7 @@ class LangChainNPCAgent:
 
         texts: list[str] = []
         metadatas: list[dict[str, Any]] = []
+        ids: list[str] = []
         created_at = datetime.now(timezone.utc).isoformat()
         for memory in atomic_memories:
             memory_fragment = str(memory["content"])
@@ -650,6 +694,8 @@ class LangChainNPCAgent:
                 print(f"⚠️ 长期记忆去重查询失败，继续写入: {exc}")
 
             texts.append(memory_fragment)
+            if source_id:
+                ids.append(str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source_id}:{len(ids)}")))
             metadatas.append({
                 "player_id": player_id,
                 "npc_id": npc_id,
@@ -659,17 +705,19 @@ class LangChainNPCAgent:
                 "confidence": float(memory["confidence"]),
                 "extraction_method": str(memory["extraction_method"]),
                 "created_at": created_at,
+                **({"source_id": source_id} if source_id else {}),
             })
 
         if texts:
-            self.vector_db.add_texts(texts=texts, metadatas=metadatas)
+            self.vector_db.add_texts(texts=texts, metadatas=metadatas,
+                                     **({"ids": ids} if source_id else {}))
 
     def get_affinity_status(self, player_id: str, npc_id: str) -> dict[str, Any]:
         # 第一阶段好感度数据还在 Python 进程内维护。
         # 后续如果 Java 能提供真实关系数据，这里可以替换成远程查询。
         print(f"💞 [工具] get_affinity_status(player_id={player_id}, npc_id={npc_id})")
         session_id = get_session_id(player_id, npc_id)
-        current_affinity = affinity_store.get(session_id, 50)
+        current_affinity = current_affinity_for(player_id, npc_id)
         reasons = affinity_reason_store.get(session_id, [])
         recent_reason = reasons[-1] if reasons else "最近互动整体平稳，没有明显冲突。"
         return {
@@ -958,9 +1006,9 @@ class LangChainNPCAgent:
             personality=personality,
             memory=memory,
             observation=observation,
-            history=history_messages,
+            history=self.history_for_model(history_messages),
         )
-        ai_msg = self.llm.invoke(messages)
+        ai_msg = self.response_model().invoke(messages)
         return ai_msg.content
 
     def generate_planned_reply(
@@ -982,10 +1030,24 @@ class LangChainNPCAgent:
             current_mood=current_mood,
             goal=plan.goal,
             execution_trace=json.dumps(self.trace_to_dict(trace), ensure_ascii=False, indent=2),
-            history=history_messages,
+            history=self.history_for_model(history_messages),
         )
-        ai_msg = self.llm.invoke(messages)
+        ai_msg = self.response_model().invoke(messages)
         return ai_msg.content
+
+    def response_model(self):
+        if getattr(self, "provider", "") == "deepseek":
+            return self.llm.bind(response_format={"type": "json_object"})
+        return self.llm
+
+    def history_for_model(self, history_messages: list[Any]) -> list[Any]:
+        if getattr(self, "provider", "") != "deepseek":
+            return history_messages
+        # 记忆中保留自然语言台词；只在模型调用时把历史 NPC 回合包装成
+        # 与本轮相同的 JSON 形式，避免模型照抄过去的纯文本输出格式。
+        return [AIMessage(content=json.dumps({"reply": str(message.content),
+                                              "affinity_change": 0}, ensure_ascii=False))
+                if isinstance(message, AIMessage) else message for message in history_messages]
 
     # ==================== 主流程 ====================
     def react(
@@ -997,10 +1059,16 @@ class LangChainNPCAgent:
         memory: str = "",
         conversation_id: str = "",
         current_affinity: int = 50,
+        cancel_event: threading.Event | None = None,
+        persist_memory: bool = True,
+        persist_long_term: bool = True,
     ) -> str:
         session_id = get_session_id(player_id, npc_id, conversation_id)
         history_messages = self.short_memory.load(session_id)
-        affinity_store[get_session_id(player_id, npc_id)] = clamp_affinity(current_affinity)
+        if persist_memory:
+            affinity_store[get_session_id(player_id, npc_id)] = clamp_affinity(current_affinity)
+        else:
+            _scene_affinity.set((player_id, npc_id, clamp_affinity(current_affinity)))
         current_mood = extract_current_mood(observation)
         player_message = self.extract_player_message(observation)
 
@@ -1050,26 +1118,35 @@ class LangChainNPCAgent:
                 )
 
         parsed_response = self.parse_json_reply(response_text)
-        reply_text = str(parsed_response.get("reply", ""))
-        affinity_change = int(parsed_response.get("affinity_change", 0))
-        if not reply_text:
+        reply_text = parsed_response.get("reply")
+        if not isinstance(reply_text, str) or not reply_text.strip():
             raise ValueError("模型结构化响应缺少 reply")
+        reply_text = reply_text.strip()
+        raw_delta = parsed_response.get("affinity_change", 0)
+        affinity_change = raw_delta if isinstance(raw_delta, int) and not isinstance(raw_delta, bool) \
+            and -3 <= raw_delta <= 3 else 0
+        parsed_response = {"reply": reply_text, "affinity_change": affinity_change}
 
-        self.short_memory.append_turn(session_id, player_message, reply_text)
-        self.store_long_term_memory(
-            player_id=player_id,
-            npc_id=npc_id,
-            conversation_id=conversation_id,
-            player_message=player_message,
-            reply_text=reply_text,
-            affinity_change=affinity_change,
-        )
-        self.update_affinity_state(
-            player_id=player_id,
-            npc_id=npc_id,
-            affinity_change=affinity_change,
-            observation=player_message,
-        )
+        if cancel_event is not None and cancel_event.is_set():
+            raise TimeoutError("Scene character result arrived after timeout")
+
+        if persist_memory:
+            self.short_memory.append_turn(session_id, player_message, reply_text)
+            if persist_long_term:
+                self.store_long_term_memory(
+                    player_id=player_id,
+                    npc_id=npc_id,
+                    conversation_id=conversation_id,
+                    player_message=player_message,
+                    reply_text=reply_text,
+                    affinity_change=affinity_change,
+                )
+            self.update_affinity_state(
+                player_id=player_id,
+                npc_id=npc_id,
+                affinity_change=affinity_change,
+                observation=player_message,
+            )
         # 向 MQ 层返回归一化后的对象 JSON，避免模型偶发双重编码导致下游再次解析失败。
         return json.dumps(parsed_response, ensure_ascii=False)
 
@@ -1095,9 +1172,19 @@ class LangChainNPCAgent:
         clean_response = response_text.strip()
         if clean_response.startswith("```json"):
             clean_response = clean_response.replace("```json", "").replace("```", "").strip()
-        parsed: Any = json.loads(clean_response)
+        if not clean_response:
+            raise ValueError("模型返回空响应")
+        try:
+            parsed: Any = json.loads(clean_response)
+        except json.JSONDecodeError as exc:
+            if clean_response[0] not in "{[`\"" and not clean_response.startswith("<think"):
+                return {"reply": clean_response[:1000], "affinity_change": 0}
+            raise ValueError("模型返回无效 JSON") from exc
         if isinstance(parsed, str):
-            parsed = json.loads(parsed)
+            try:
+                parsed = json.loads(parsed)
+            except json.JSONDecodeError:
+                return {"reply": parsed[:1000], "affinity_change": 0}
         if not isinstance(parsed, dict):
             raise ValueError("模型结构化响应必须是 JSON 对象")
         return parsed

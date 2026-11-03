@@ -1,10 +1,11 @@
 package com.cybertown.service;
 
 import com.cybertown.entity.ChatTask;
+import com.cybertown.entity.TaskOutbox;
+import com.cybertown.config.RabbitConfig;
 import com.cybertown.enums.ChatTaskStatus;
 import com.cybertown.mapper.ChatTaskMapper;
 import com.cybertown.mapper.TaskOutboxMapper;
-import com.cybertown.websocket.ChatWebSocketHandler;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -24,7 +25,7 @@ public class TaskRecoveryService {
     @Autowired private ChatTaskMapper taskMapper;
     @Autowired private TaskOutboxMapper outboxMapper;
     @Autowired private AsyncChatService chatService;
-    @Autowired private ChatWebSocketHandler webSocketHandler;
+    @Autowired private WebSocketPushService webSocketPushService;
 
     @Value("${chat.task.timeout-seconds:90}")
     private long timeoutSeconds;
@@ -49,7 +50,11 @@ public class TaskRecoveryService {
                 task.setLastError("任务处理超时，已触发第 " + (retryCount + 1) + " 次补偿投递");
                 task.setVersion(task.getVersion() == null ? 1L : task.getVersion() + 1);
                 taskMapper.updateById(task);
-                outboxMapper.insert(chatService.newOutbox(task.getTaskId(), task.getRequestPayload()));
+                TaskOutbox compensation = chatService.newOutbox(task.getTaskId(), task.getRequestPayload());
+                if ("world".equals(task.getPlayerId())) {
+                    compensation.setRoutingKey(RabbitConfig.BACKGROUND_ROUTING_KEY);
+                }
+                outboxMapper.insert(compensation);
                 afterCommit(() -> chatService.cacheTask(task));
                 continue;
             }
@@ -69,7 +74,7 @@ public class TaskRecoveryService {
                 payload.put("npc_id", task.getNpcId());
                 payload.put("reply", task.getLastError());
                 payload.put("mood", task.getMood());
-                webSocketHandler.sendToPlayer(task.getPlayerId(), payload);
+                webSocketPushService.sendLater(task.getPlayerId(), payload);
             });
         }
     }

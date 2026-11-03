@@ -21,7 +21,7 @@ public interface PlayerNpcRelationMapper extends BaseMapper<PlayerNpcRelation> {
     @Update("""
             UPDATE player_npc_relations
             SET affinity = LEAST(100, GREATEST(0, affinity + #{delta})),
-                mood = #{mood}, version = version + 1
+                version = version + 1
             WHERE player_id = #{playerId} AND npc_id = #{npcId}
             """)
     int applyResult(@Param("playerId") String playerId,

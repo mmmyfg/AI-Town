@@ -9,10 +9,15 @@ extends CanvasLayer
 @onready var player_input: LineEdit = $Panel/PlayerInput
 @onready var send_button: Button = $Panel/SendButton
 @onready var close_button: Button = $Panel/CloseButton
+@onready var scene_button: Button = $Panel/SceneButton
+@onready var companion: OptionButton = $Panel/Companion
 
 # 当前对话的NPC
 var current_npc_name: String = ""
 var is_waiting_for_reply: bool = false
+var group_mode: bool = false
+var available_npcs: Array = []
+var npc_titles: Dictionary = {}
 
 # API客户端引用
 var api_client: Node = null
@@ -27,6 +32,7 @@ func _ready():
 	# 连接按钮信号
 	send_button.pressed.connect(_on_send_button_pressed)
 	close_button.pressed.connect(_on_close_button_pressed)
+	scene_button.pressed.connect(_toggle_scene_mode)
 	player_input.text_submitted.connect(_on_text_submitted)
 
 	# 获取API客户端
@@ -34,8 +40,11 @@ func _ready():
 	if api_client:
 		api_client.chat_response_received.connect(_on_chat_response_received)
 		api_client.chat_error.connect(_on_chat_error)
+		api_client.scene_response_received.connect(_on_scene_response_received)
+		api_client.npc_list_received.connect(_on_npc_list_received)
 		if api_client.has_signal("chat_task_accepted"):
 			api_client.chat_task_accepted.connect(_on_chat_task_accepted)
+		api_client.get_npc_list()
 
 	print("[INFO] 对话UI初始化完成")
 
@@ -86,6 +95,10 @@ func _input(event: InputEvent):
 func start_dialogue(npc_name: String):
 	"""开始与NPC对话"""
 	current_npc_name = npc_name
+	group_mode = false
+	companion.visible = false
+	scene_button.text = "多人场景"
+	_refresh_companions()
 
 	# 通知NPC进入交互状态 (停止移动) 
 	var npc = get_npc_by_name(npc_name)
@@ -94,7 +107,7 @@ func start_dialogue(npc_name: String):
 
 	# 设置NPC信息
 	npc_name_label.text = npc_name
-	npc_title_label.text = Config.NPC_TITLES.get(npc_name, "")
+	npc_title_label.text = npc_titles.get(npc_name, Config.NPC_TITLES.get(npc_name, ""))
 
 	# 清空对话内容
 	dialogue_text.clear()
@@ -173,7 +186,10 @@ func send_message():
 	
 	# 发送API请求
 	if api_client:
-		api_client.send_chat(current_npc_name, message)
+		if group_mode and companion.item_count > 0:
+			api_client.send_scene([current_npc_name, companion.get_item_text(companion.selected)], message)
+		else:
+			api_client.send_chat(current_npc_name, message)
 	else:
 		print("[ERROR] API客户端未找到")
 
@@ -195,6 +211,54 @@ func _on_chat_response_received(npc_name: String, message: String):
 	dialogue_text.append_text("[color=yellow]" + npc_name + ":[/color] " + message + "\n")
 	
 	# 滚动到底部
+	dialogue_text.scroll_to_line(dialogue_text.get_line_count() - 1)
+	is_waiting_for_reply = false
+
+func _toggle_scene_mode() -> void:
+	if is_waiting_for_reply:
+		return
+	group_mode = not group_mode
+	companion.visible = group_mode
+	scene_button.text = "返回单人" if group_mode else "多人场景"
+	dialogue_text.append_text("[color=gray]" + ("已切换到多人场景，选择另一位 NPC。" if group_mode else "已切换到单人对话。") + "[/color]\n")
+
+func _on_npc_list_received(npcs: Array) -> void:
+	available_npcs.clear()
+	npc_titles.clear()
+	for item in npcs:
+		if not item is Dictionary:
+			continue
+		var npc_name = str(item.get("npcId", ""))
+		if npc_name.is_empty():
+			continue
+		available_npcs.append(npc_name)
+		npc_titles[npc_name] = str(item.get("title", ""))
+	if not current_npc_name.is_empty() and not is_waiting_for_reply:
+		_refresh_companions()
+		npc_title_label.text = npc_titles.get(current_npc_name, Config.NPC_TITLES.get(current_npc_name, ""))
+
+func _refresh_companions() -> void:
+	companion.clear()
+	var names: Array = available_npcs if not available_npcs.is_empty() else Config.NPC_NAMES
+	for npc_name in names:
+		if npc_name != current_npc_name:
+			companion.add_item(npc_name)
+
+func _on_scene_response_received(messages: Array) -> void:
+	if not group_mode:
+		return
+	var last_round: int = 0
+	for item in messages:
+		var round_no: int = int(item.get("round", 1))
+		if round_no != last_round:
+			dialogue_text.append_text("[color=gray]第 " + str(round_no) + " 轮[/color]\n")
+			last_round = round_no
+		var name = str(item.get("npcId", "NPC"))
+		if str(item.get("status", "FAILED")) == "COMPLETED":
+			dialogue_text.append_text("[color=yellow]" + name + ":[/color] " + str(item.get("reply", "")) + "\n")
+		else:
+			dialogue_text.append_text("[color=gray]" + name + " 本轮未能回应。[/color]\n")
+	dialogue_text.append_text("[color=gray]场景任务已完成。[/color]\n")
 	dialogue_text.scroll_to_line(dialogue_text.get_line_count() - 1)
 	is_waiting_for_reply = false
 

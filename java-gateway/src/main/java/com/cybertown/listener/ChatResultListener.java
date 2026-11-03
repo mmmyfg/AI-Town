@@ -3,7 +3,7 @@ package com.cybertown.listener;
 import com.cybertown.config.RabbitConfig;
 import com.cybertown.dto.ChatResultMessage;
 import com.cybertown.service.AsyncChatService;
-import com.cybertown.websocket.ChatWebSocketHandler;
+import com.cybertown.service.WebSocketPushService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rabbitmq.client.Channel;
 import org.springframework.amqp.core.Message;
@@ -19,7 +19,7 @@ import java.util.Map;
 public class ChatResultListener {
     @Autowired private ObjectMapper objectMapper;
     @Autowired private AsyncChatService asyncChatService;
-    @Autowired private ChatWebSocketHandler chatWebSocketHandler;
+    @Autowired private WebSocketPushService webSocketPushService;
 
     @RabbitListener(queues = RabbitConfig.CHAT_RESULT_QUEUE, ackMode = "MANUAL")
     public void handleChatResult(Message amqpMessage, Channel channel) throws IOException {
@@ -33,7 +33,7 @@ public class ChatResultListener {
                 Map<String, Object> payload = new LinkedHashMap<>(asyncChatService.getTaskResult(outcome.taskId()));
                 payload.put("task_id", outcome.taskId());
                 payload.put("npc_id", outcome.npcId());
-                chatWebSocketHandler.sendToPlayer(outcome.playerId(), payload);
+                webSocketPushService.sendLater(outcome.playerId(), payload);
             }
             channel.basicAck(deliveryTag, false);
         } catch (Exception exception) {

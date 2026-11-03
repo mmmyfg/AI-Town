@@ -99,6 +99,15 @@ class MemoryPolicyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.agent.parse_json_reply('["unexpected"]')
 
+    def test_plain_text_model_reply_keeps_dialogue_with_neutral_change(self):
+        parsed = self.agent.parse_json_reply("那就做朋友吧。")
+        self.assertEqual(parsed, {"reply": "那就做朋友吧。", "affinity_change": 0})
+
+    def test_blank_or_broken_json_model_reply_is_rejected(self):
+        for raw in ("   ", '{"reply":'):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                self.agent.parse_json_reply(raw)
+
     def test_mq_parser_accepts_double_encoded_json(self):
         parsed = parse_agent_reply(
             '"{\\"reply\\": \\"记得\\", \\"affinity_change\\": 0}"'

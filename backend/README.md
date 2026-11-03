@@ -70,7 +70,7 @@ Godot
 
 另外本项目实际还会用到：
 
-- Groq 兼容 OpenAI 接口
+- DeepSeek OpenAI 兼容接口
 - RabbitMQ
 - Redis
 - Chroma 本地向量库
@@ -92,7 +92,8 @@ Godot
 当前代码实际读取的关键变量主要有：
 
 ```env
-GROQ_API_KEY=your-groq-api-key
+NPC_LLM_PROVIDER=deepseek
+DEEPSEEK_API_KEY=your-deepseek-api-key
 RABBITMQ_HOST=localhost
 RABBITMQ_PORT=5672
 REDIS_HOST=localhost
@@ -102,7 +103,7 @@ REDIS_DB=0
 
 说明：
 
-- `langchain_agent.py` 当前默认走 Groq 的 OpenAI 兼容接口
+- `langchain_agent.py` 当前默认走 DeepSeek 的 OpenAI 兼容接口；本地测试使用 `deepseek-flash` 非思考模式
 - `mq_consumer.py` 会读取 RabbitMQ 和 Redis 地址
 - `.env.example` 已包含推理超时、重试、短期记忆和长期记忆策略参数
 
